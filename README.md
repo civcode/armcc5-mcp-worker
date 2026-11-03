@@ -87,7 +87,9 @@ python -m unittest discover -s tests -v
 python -m py_compile server.py worker_core.py
 ```
 
-The tests use fake compiler executables, so they verify the orchestration logic but **do not** establish real ARMCC5/Keil behavior or an end-to-end Windows-to-Pi connection. The MCP transport itself requires `pip install -r requirements.txt`.
+The tests use **Python subprocess mocks**, not real compiler binaries. They create empty `.exe` placeholders only to verify availability checks, then simulate `armcc`, `fromelf`, and `armlink` execution in Python; this makes the suite portable to **Windows and Linux**. They verify the orchestration logic but **do not** establish real ARMCC5/Keil behavior or an end-to-end Windows-to-Pi connection. The MCP transport itself requires `pip install -r requirements.txt`.
+
+**Windows troubleshooting:** Older test revisions wrote Unix `#!` Python scripts with an `.exe` extension and attempted to execute them. Windows then displayed an **Unsupported 16-Bit Application** dialog for a path resembling `%TEMP%\\tmp...\\bin\\armcc.exe`. That path is a *test mock*, not the ARM compiler in `C:\\DevTools\\KeilAC5\\ARM\\arm_compiler_5.06\\bin`. Update the checkout (`git pull`) to get the corrected tests; no compiler reinstall is needed.
 
 ## Why two toolchains?
 
