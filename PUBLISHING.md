@@ -17,11 +17,11 @@ start.cmd
 ## On Oberon (Linux)
 
 ```bash
-pi mcp add armcc5 --url http://x1-carbon:8765/mcp
+pi mcp add armcc5 --url http://x1-carbon.local:8765/mcp
 pi mcp list
 ```
 
-Adjust the host name if needed; see [README.md](README.md) for configuration and tooling.
+The `x1-carbon.local` endpoint was verified from Oberon; adjust the hostname or use the LAN IP if needed; see [README.md](README.md) for configuration and tooling.
 
 ## SDK integration
 

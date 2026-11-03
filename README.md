@@ -49,18 +49,18 @@ The `ARMCC_ROOT` setting made with `set` is temporary and applies only to that C
 
 **Note:** `armcc.exe --vsn` checks compiler availability, not whether a test program will compile/link under the MDK-ARM Lite license.
 
-The process listens on `0.0.0.0:8765` and serves MCP at `http://x1-carbon:8765/mcp`; close the terminal or press Ctrl+C to stop it. The first connection may prompt for a Windows Defender Firewall exception for the private LAN. If necessary, set `ARMCC_ROOT`, `ARMCC_HTTP_HOST`, or `ARMCC_HTTP_PORT` before running `start.cmd`.
+The process listens on `0.0.0.0:8765` and serves MCP at `http://x1-carbon.local:8765/mcp`; close the terminal or press Ctrl+C to stop it. The first connection may prompt for a Windows Defender Firewall exception for the private LAN. If necessary, set `ARMCC_ROOT`, `ARMCC_HTTP_HOST`, or `ARMCC_HTTP_PORT` before running `start.cmd`.
 
 No firmware repository checkout or SDK libraries are required on Windows. Only source snippets sent by the client are compiled and kept in temporary per-job folders.
 
 ## Oberon: connect Pi
 
 ```bash
-pi mcp add armcc5 --url http://x1-carbon:8765/mcp
+pi mcp add armcc5 --url http://x1-carbon.local:8765/mcp
 pi mcp list
 ```
 
-If `x1-carbon` is not resolvable on the LAN, use the Windows machine's IP address. Alternatively, merge `pi-mcp.json` into `~/.pi/agent/mcp.json`. In Pi, `/mcp` shows connection status.
+**Verified on Oberon:** `http://x1-carbon.local:8765/mcp` connects successfully and lists all five MCP tools. The short hostname `x1-carbon` returned `fetch failed`; the `.local` name resolves through mDNS on this LAN. If `.local` is not resolvable on another host, use the Windows machine's LAN IP address. Alternatively, merge `pi-mcp.json` into `~/.pi/agent/mcp.json`. In Pi, `/mcp` shows connection status. This confirms MCP connectivity, not yet successful compilation by the real ARMCC toolchain.
 
 Example request to Pi:
 
