@@ -14,6 +14,41 @@ py -3 -m venv .venv
 start.cmd
 ```
 
+### Custom ARM Compiler installation path
+
+The worker uses `ARMCC_ROOT` to locate the compiler. Set it to the **installation directory containing the `bin` folder**, not to `bin` itself. The launcher (`start.cmd`) respects this setting and adds `%ARMCC_ROOT%\bin` to `PATH`; no source-code changes or relocation of the compiler are required.
+
+For example, the working installation on **x1-carbon** is at `C:\DevTools\KeilAC5\ARM\arm_compiler_5.06\bin`. From the worker checkout in the **same Command Prompt**:
+
+```bat
+C:
+cd \workspace\armcc5-mcp-worker
+set "ARMCC_ROOT=C:\DevTools\KeilAC5\ARM\arm_compiler_5.06"
+"%ARMCC_ROOT%\bin\armcc.exe" --vsn
+```
+
+Example of the version output observed on x1-carbon:
+
+```text
+Product: MDK-ARM Lite 5.43
+Component: ARM Compiler 5.06 update 7 (build 960)
+Tool: armcc [4d365
+```
+
+This confirms that `armcc.exe` is accessible and reports **5.06 update 7 (build 960)**. The original firmware's vendor libraries were built with **5.06 update 6 (build 750)**, so record the actual compiler version with each reverse-engineering experiment; u7 is useful for experiments but should not be assumed to generate byte-identical u6 code.
+
+After verifying the path, install Python dependencies if needed and start the MCP endpoint **in that same Command Prompt**:
+
+```bat
+py -3 -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+start.cmd
+```
+
+The `ARMCC_ROOT` setting made with `set` is temporary and applies only to that Command Prompt. Set it again in new sessions, or set it permanently through your Windows environment configuration. To check the resolved paths from Oberon, call the MCP `compiler_info` tool: it reports the compiler root and availability of `armcc.exe`, `armlink.exe`, and `fromelf.exe`.
+
+**Note:** `armcc.exe --vsn` checks compiler availability, not whether a test program will compile/link under the MDK-ARM Lite license.
+
 The process listens on `0.0.0.0:8765` and serves MCP at `http://x1-carbon:8765/mcp`; close the terminal or press Ctrl+C to stop it. The first connection may prompt for a Windows Defender Firewall exception for the private LAN. If necessary, set `ARMCC_ROOT`, `ARMCC_HTTP_HOST`, or `ARMCC_HTTP_PORT` before running `start.cmd`.
 
 No firmware repository checkout or SDK libraries are required on Windows. Only source snippets sent by the client are compiled and kept in temporary per-job folders.
