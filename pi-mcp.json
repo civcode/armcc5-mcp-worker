@@ -2,10 +2,10 @@
   "mcpServers": {
     "armcc5": {
       "type": "http",
-      "url": "http://lenovo-x1:8765/mcp",
+      "url": "http://x1-carbon:8765/mcp",
       "timeout": 120,
       "exposure": "codemode",
-      "description": "ARM Compiler 5.06u6 compilation, linking and fromelf on Lenovo-X1"
+      "description": "ARM Compiler 5.06u6 compilation, linking and fromelf on x1-carbon"
     }
   }
 }

@@ -4,7 +4,7 @@ Canonical worker source: <https://github.com/civcode/armcc5-mcp-worker> (`main`)
 
 This repository contains only the Windows-hosted plain-HTTP MCP worker. Its source is intentionally separate from the firmware SDK and has **no GitHub Actions workflows**.
 
-## On Lenovo-X1 (Windows)
+## On x1-carbon (Windows)
 
 ```bat
 git clone https://github.com/civcode/armcc5-mcp-worker.git
@@ -17,7 +17,7 @@ start.cmd
 ## On Oberon (Linux)
 
 ```bash
-pi mcp add armcc5 --url http://lenovo-x1:8765/mcp
+pi mcp add armcc5 --url http://x1-carbon:8765/mcp
 pi mcp list
 ```
 

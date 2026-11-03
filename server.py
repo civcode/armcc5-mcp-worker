@@ -11,7 +11,7 @@ from worker_core import ARMCCWorker
 worker = ARMCCWorker()
 mcp = MCPServer(
     "armcc5-windows",
-    instructions="Compile Cortex-M3 C probes and inspect/link outputs using ARM Compiler 5.06u6 on Lenovo-X1.",
+    instructions="Compile Cortex-M3 C probes and inspect/link outputs using ARM Compiler 5.06u6 on x1-carbon.",
 )
 
 
