@@ -194,6 +194,17 @@ class ImprovementsTests(unittest.TestCase):
         self.assertEqual(result["unknown_arguments"],["flags"])
         self.assertEqual(invoked,[])
 
+    def test_mapping_proxy_raw_arguments_are_validated(self):
+        from types import MappingProxyType
+        ctx = type("C", (), {"request_context": type("R", (), {
+            "params": MappingProxyType({"arguments": MappingProxyType({"tool": "value"})})
+        })()})()
+        result = checked_call(ctx, "tool_help", {"tool"}, lambda: {"ok": True})
+        self.assertTrue(result["ok"], result)
+        result = checked_call(ctx, "tool_help", set(), lambda: {"ok": True})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_type"], "UnknownToolArgument")
+
     def test_persistence_survives_new_worker(self):
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict("os.environ",{"ARMCC_ARTIFACT_DIR":directory}):
             a=ARMCCWorker(str(self.root))

@@ -6,17 +6,21 @@ import the MCP SDK, so the check can be tested without networking.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 
 def checked_call(ctx, tool_name: str, allowed: set[str], operation, *args):
     try:
         params = ctx.request_context.params
-        if isinstance(params, dict):
-            raw = params["arguments"]
+        if isinstance(params, Mapping):
+            raw = params.get("arguments", {})
         else:
             raw = params.arguments
-        if not isinstance(raw, dict):
-            raise TypeError("raw arguments are not a dictionary")
-    except (AttributeError, TypeError, KeyError) as ex:
+        if raw is None:
+            raw = {}
+        if not isinstance(raw, Mapping):
+            raise TypeError("raw arguments are not a mapping")
+    except (AttributeError, TypeError, KeyError, ValueError) as ex:
         return {"ok": False, "error": f"Cannot validate raw MCP arguments for {tool_name}: {ex}",
                 "error_type": "ValidationUnavailable"}
     unknown = sorted(set(raw) - allowed)
