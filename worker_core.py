@@ -13,8 +13,10 @@ import tempfile
 import threading
 import uuid
 
+from compiler_features import CompilerFeatures
 
-class ARMCCWorker:
+
+class ARMCCWorker(CompilerFeatures):
     """Small, session-local artifact store and compiler wrapper."""
 
     MAX_SOURCE_BYTES = 256 * 1024
@@ -68,14 +70,19 @@ class ARMCCWorker:
             raise ValueError(f"Artifact exceeds {self.MAX_ARTIFACT_BYTES} bytes")
         artifact_id = uuid.uuid4().hex
         with path.open("rb") as f:
+            signature = f.read(16)
+            f.seek(0)
             sha256 = hashlib.file_digest(f, "sha256").hexdigest()
+        artifact_format = ("ELF" if signature.startswith(b"\x7fELF") else
+                           "ORC" if signature.startswith(b"\xf7ORC") else
+                           "text" if path.suffix.lower() in (".i", ".s", ".lst", ".map", ".txt") else
+                           "unknown")
         with self.lock:
             self.artifacts[artifact_id] = path
         return {
-            "artifact_id": artifact_id,
-            "name": path.name,
-            "size": size,
-            "sha256": sha256,
+            "artifact_id": artifact_id, "name": path.name, "size": size,
+            "sha256": sha256, "format": artifact_format,
+            "first_16_bytes_hex": signature.hex(),
         }
 
     def _lookup(self, artifact_id: str) -> Path:
@@ -88,7 +95,8 @@ class ARMCCWorker:
     def compiler_info(self) -> dict:
         tools = {n: str(self._exe(n)) for n in ("armcc", "fromelf", "armlink")}
         available = {n: Path(p).is_file() for n, p in tools.items()}
-        result = {"compiler_root": str(self.root), "tools": tools, "available": available}
+        result = {"compiler_root": str(self.root), "tools": tools, "available": available,
+                  "capabilities": self.compiler_capabilities()}
         if available["armcc"]:
             result["armcc_version"] = self._run([str(self._exe("armcc")), "--vsn"], timeout=10)
         return result
@@ -125,35 +133,57 @@ class ARMCCWorker:
             result["error"] = "Compiler returned success without producing an object"
         return result
 
-    def inspect_object(self, artifact_id: str, view: str = "all") -> dict:
-        """Inspect an object or linked ELF/AXF with ARM fromelf."""
+    def inspect_object(self, artifact_id: str, view: str = "all", save_output: bool = False) -> dict:
+        """Inspect a native object or AXF, optionally saving the entire fromelf output."""
         views = {
             "code": ["-c"], "symbols": ["-s"],
             "relocations": ["-r"], "sections": ["-v"],
             "all": ["-c", "-s", "-r"],
+            "source": ["-c", "--interleave=source"],
         }
         if view not in views:
             return {"ok": False, "error": f"view must be one of {list(views)}"}
         path = self._lookup(artifact_id)
-        result = self._run([str(self._exe("fromelf")), "--text", *views[view], str(path)], timeout=30)
-        result["view"] = view
+        argv = [str(self._exe("fromelf")), "--text", *views[view], str(path)]
+        if save_output:
+            out = self.workspace / uuid.uuid4().hex
+            out.mkdir()
+            report = out / f"fromelf_{view}.txt"
+            result = self._run_to_file(argv, cwd=path.parent, output=report, timeout=60)
+            if result["ok"]:
+                result["report"] = self._register(report)
+        else:
+            result = self._run(argv, cwd=path.parent, timeout=30)
+        result.update({"view": view, "command": argv})
         return result
 
-    def link_probe(self, object_ids: list[str], entry_symbol: str = "main") -> dict:
-        """Small ARMCC/armlink experiment; constrained by the installed license."""
+    def link_probe(self, object_ids: list[str], entry_symbol: str = "main",
+                   scatter_content: str | None = None) -> dict:
+        """Link objects with a complete map artifact; optionally use a scatter file."""
         if not 1 <= len(object_ids) <= 12:
             return {"ok": False, "error": "Need 1..12 object IDs"}
         if not re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", entry_symbol):
             return {"ok": False, "error": "Invalid entry symbol"}
+        if scatter_content is not None and (not isinstance(scatter_content, str) or
+                                            len(scatter_content.encode("utf-8")) > 256 * 1024):
+            return {"ok": False, "error": "scatter_content must be UTF-8 text <= 256 KiB"}
         objects = [self._lookup(i) for i in object_ids]
         job = self.workspace / uuid.uuid4().hex
         job.mkdir()
         target = job / "probe.axf"
-        argv = [str(self._exe("armlink")), "--cpu", "Cortex-M3", "--entry", entry_symbol,
-                "--ro-base", "0x08000000", "--rw-base", "0x20000000",
-                "--output", str(target), *[str(o) for o in objects]]
-        result = self._run(argv, cwd=job, timeout=30)
+        listing = job / "probe.map"
+        argv = [str(self._exe("armlink")), "--cpu", "Cortex-M3", "--entry", entry_symbol]
+        if scatter_content is None:
+            argv.extend(["--ro-base", "0x08000000", "--rw-base", "0x20000000"])
+        else:
+            scatter = job / "probe.sct"
+            scatter.write_text(scatter_content, encoding="utf-8")
+            argv.extend(["--scatter", str(scatter)])
+        argv.extend(["--output", str(target), "--map", f"--list={listing}", *[str(o) for o in objects]])
+        result = self._run(argv, cwd=job, timeout=60)
         result["command"] = argv
+        if listing.is_file():
+            result["map"] = self._register(listing)
         if result["ok"] and target.is_file():
             result["axf"] = self._register(target)
         elif result["ok"]:
@@ -162,7 +192,7 @@ class ARMCCWorker:
         return result
 
     def get_artifact(self, artifact_id: str, offset: int = 0, max_bytes: int = 65536) -> dict:
-        """Read a generated binary in base64 chunks for transfer to Oberon."""
+        """Read original tool output byte-for-byte in base64 chunks."""
         if not 0 <= max_bytes <= self.MAX_CHUNK or max_bytes == 0:
             return {"ok": False, "error": f"max_bytes must be 1..{self.MAX_CHUNK}"}
         path = self._lookup(artifact_id)
@@ -170,11 +200,15 @@ class ARMCCWorker:
         if not 0 <= offset <= size:
             return {"ok": False, "error": f"offset must be 0..{size}"}
         with path.open("rb") as f:
+            signature = f.read(4)
             f.seek(offset)
             chunk = f.read(max_bytes)
+        fmt = ("ELF" if signature == b"\x7fELF" else
+               "ORC" if signature == b"\xf7ORC" else
+               "text" if path.suffix.lower() in (".i", ".s", ".map", ".txt") else "unknown")
         return {
             "ok": True, "artifact_id": artifact_id,
-            "filename": path.name, "total_bytes": size,
+            "filename": path.name, "total_bytes": size, "format": fmt,
             "offset": offset, "next_offset": offset + len(chunk),
             "complete": offset + len(chunk) == size,
             "base64": base64.b64encode(chunk).decode("ascii"),

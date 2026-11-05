@@ -18,12 +18,12 @@ start.cmd
 
 The worker uses `ARMCC_ROOT` to locate the compiler. Set it to the **installation directory containing the `bin` folder**, not to `bin` itself. The launcher (`start.cmd`) respects this setting and adds `%ARMCC_ROOT%\bin` to `PATH`; no source-code changes or relocation of the compiler are required.
 
-For example, the working installation on **x1-carbon** is at `C:\DevTools\KeilAC5\ARM\arm_compiler_5.06\bin`. From the worker checkout in the **same Command Prompt**:
+For example, the working installation on **x1-carbon** is at `C:\DevTools\KeilAC5\ARM\ARM_Compiler_5.06u6\bin`. From the worker checkout in the **same Command Prompt**:
 
 ```bat
 C:
 cd \workspace\armcc5-mcp-worker
-set "ARMCC_ROOT=C:\DevTools\KeilAC5\ARM\arm_compiler_5.06"
+set "ARMCC_ROOT=C:\DevTools\KeilAC5\ARM\ARM_Compiler_5.06u6"
 "%ARMCC_ROOT%\bin\armcc.exe" --vsn
 ```
 
@@ -31,11 +31,11 @@ Example of the version output observed on x1-carbon:
 
 ```text
 Product: MDK-ARM Lite 5.43
-Component: ARM Compiler 5.06 update 7 (build 960)
+Component: ARM Compiler 5.06 update 6 (build 750)
 Tool: armcc [4d365
 ```
 
-This confirms that `armcc.exe` is accessible and reports **5.06 update 7 (build 960)**. The original firmware's vendor libraries were built with **5.06 update 6 (build 750)**, so record the actual compiler version with each reverse-engineering experiment; u7 is useful for experiments but should not be assumed to generate byte-identical u6 code.
+The Windows capability probe on 2026-11-05 confirms **5.06 update 6 (build 750)** with **MDK-ARM Lite 5.43**. This matches the compiler update/build reported for the original vendor libraries. Record actual version, flags, headers and license behavior for every comparison.
 
 After verifying the path, install Python dependencies if needed and start the MCP endpoint **in that same Command Prompt**:
 
@@ -51,7 +51,7 @@ The `ARMCC_ROOT` setting made with `set` is temporary and applies only to that C
 
 The process listens on `0.0.0.0:8765` and serves MCP at `http://x1-carbon.local:8765/mcp`; close the terminal or press Ctrl+C to stop it. The first connection may prompt for a Windows Defender Firewall exception for the private LAN. If necessary, set `ARMCC_ROOT`, `ARMCC_HTTP_HOST`, or `ARMCC_HTTP_PORT` before running `start.cmd`.
 
-No firmware repository checkout or SDK libraries are required on Windows. Only source snippets sent by the client are compiled and kept in temporary per-job folders.
+No firmware repository checkout is required on Windows. Client-supplied source/header trees are staged into temporary per-job folders; individual headers, sources and include paths must be supplied in the MCP request.
 
 ## Oberon: connect Pi
 
@@ -60,7 +60,7 @@ pi mcp add armcc5 --url http://x1-carbon.local:8765/mcp
 pi mcp list
 ```
 
-**Verified on Oberon:** `http://x1-carbon.local:8765/mcp` connects successfully and lists all five MCP tools. The short hostname `x1-carbon` returned `fetch failed`; the `.local` name resolves through mDNS on this LAN. If `.local` is not resolvable on another host, use the Windows machine's LAN IP address. Alternatively, merge `pi-mcp.json` into `~/.pi/agent/mcp.json`. In Pi, `/mcp` shows connection status. This confirms MCP connectivity, not yet successful compilation by the real ARMCC toolchain.
+**Verified on Oberon:** `http://x1-carbon.local:8765/mcp` was verified with the previous five MCP tools. The short hostname `x1-carbon` returned `fetch failed`; the `.local` name resolves through mDNS on this LAN. If `.local` is not resolvable on another host, use the Windows machine's LAN IP address. Alternatively, merge `pi-mcp.json` into `~/.pi/agent/mcp.json`. In Pi, `/mcp` shows connection status. This confirms MCP connectivity, not yet successful compilation by the real ARMCC toolchain.
 
 Example request to Pi:
 
@@ -70,11 +70,74 @@ Example request to Pi:
 
 | Tool | Purpose |
 | --- | --- |
-| `compiler_info` | Check ARMCC5, armlink, and fromelf availability and compiler version |
-| `compile_c` | Compile one Cortex-M3 C translation unit and return output diagnostics plus an artifact ID and SHA-256 |
-| `inspect_object` | Inspect a generated object or AXF using `fromelf` (`code`, `symbols`, `relocations`, `sections`, `all`) |
-| `link_probe` | Link a small experiment using `armlink`; subject to the installed compiler's license and link-size limitations |
-| `get_artifact` | Return generated binary artifacts in base64-encoded chunks with offsets |
+| `compiler_info` | Tool availability, actual armcc version and observed license capabilities |
+| `compiler_capabilities` | Explicitly identify compiler capabilities and MDK-Lite license restrictions |
+| `compile_c` | Existing single-source compilation interface (unchanged) |
+| `compile_files` | Stage multiple sources/headers with relative include paths; mode `object`, `preprocess`, or `assembly` |
+| `inspect_object` | fromelf views `code`, `symbols`, `relocations`, `sections`, `all`, and `source`; `save_output=true` stores complete text |
+| `export_elf` | Try native `fromelf --elf` and explain `Q3921U` if MDK-Lite forbids it |
+| `link_probe` | Link up to 12 objects; return downloadable `probe.map`; optional `scatter_content` |
+| `get_artifact` | Chunked, lossless Base64 artifact download with original ORC/ELF/text format identification |
+
+### Reproducible source-tree compilation
+
+`compile_files` accepts at most 128 staged UTF-8 files (1 MiB each, 4 MiB total).
+All paths are relative to an isolated job tree, using forward slashes. Sources
+compile separately, so functions/sections are not merged accidentally. Only
+include directories inside the uploaded tree are accepted. Up to 24 source files
+can be compiled per call. The returned per-source `command`, `source_sha256`
+and native artifact ID allow faithful reconstruction of the command line.
+
+Example inputs (MCP parameters shown in JSON):
+
+```json
+{
+  "files": [
+    {"path": "src/node.c", "content": "#include \"node.h\"\nint node(void){return ANSWER;}"},
+    {"path": "include/node.h", "content": "#define ANSWER 42\n"}
+  ],
+  "sources": ["src/node.c"],
+  "include_paths": ["include"],
+  "optimization": 3,
+  "debug": true,
+  "extra_flags": ["--apcs=interwork", "-D__MICROLIB"],
+  "mode": "object"
+}
+```
+
+Use `mode="preprocess"` to invoke **ARMCC's native `-E`**, saving the
+entire `.i` file for transfer through `get_artifact`. It does not use host
+cpp or ARMCC-compatibility shims. Use `inspect_object(view="source",
+save_output=true)` for source-interleaved `fromelf` disassembly and download
+the complete report via its `report.artifact_id`, avoiding the inline text
+size limit. The original native object bytes remain unchanged.
+
+### License-limited features remain visible
+
+The real Windows probe of ARM Compiler **5.06u6 build 750 / MDK-ARM Lite** on
+2026-11-05 established:
+
+| Operation | Observed result | MCP behavior |
+| --- | --- | --- |
+| ARMCC compilation, `-I`, `-E` | Available | `compile_files(mode="object"/"preprocess")` |
+| `fromelf --text -c --interleave=source` | Available | `inspect_object(view="source")` |
+| `armcc -S --interleave` or `--asm` | **License denies: C3921U** | `compile_files(mode="assembly")` executes the command and returns `unavailable_reason="license"` with the original diagnostic |
+| `fromelf --elf` on symbolic ORC | **License denies: Q3921U** | `export_elf(object_id)` executes it and returns `unavailable_reason="license"` with the original diagnostic |
+| `armlink --map --list=...` | Available | `link_probe` returns `axf` and `map` artifacts |
+
+Unsupported-by-license operations are **not hidden or emulated**: the MCP
+worker attempts the requested operation and returns the exact ARMCC/fromelf
+diagnostic and a practical alternative. A future upgraded license could allow
+the same operation to succeed without an MCP code change. Native `.o`
+artifacts on the measured Lite installation begin with `F7 4F 52 43`
+(ORC); linked AXF is ELF (`7F 45 4C 46`). `get_artifact` never wraps or
+converts the original bytes. A linked AXF is not a substitute for the original
+relocatable object.
+
+`link_probe` now captures a complete map through `--map --list=...`,
+and optionally uses supplied `scatter_content` instead of its default
+RO/RW base addresses. Link-size restrictions from the installed license
+still apply. A successful map alone does not establish ABI/runtime parity.
 
 Object IDs persist in memory until the worker process exits. Generated artifacts live in a temporary directory and are removed on worker exit. This version has no persistent job queue, file sharing, or arbitrary remote command execution.
 
@@ -84,18 +147,18 @@ From the repository root, on Linux or Windows:
 
 ```bash
 python -m unittest discover -s tests -v
-python -m py_compile server.py worker_core.py
+python -m py_compile server.py worker_core.py compiler_features.py
 ```
 
 The tests use **Python subprocess mocks**, not real compiler binaries. They create empty `.exe` placeholders only to verify availability checks, then simulate `armcc`, `fromelf`, and `armlink` execution in Python; this makes the suite portable to **Windows and Linux**. They verify the orchestration logic but **do not** establish real ARMCC5/Keil behavior or an end-to-end Windows-to-Pi connection. The MCP transport itself requires `pip install -r requirements.txt`.
 
-**Windows troubleshooting:** Older test revisions wrote Unix `#!` Python scripts with an `.exe` extension and attempted to execute them. Windows then displayed an **Unsupported 16-Bit Application** dialog for a path resembling `%TEMP%\\tmp...\\bin\\armcc.exe`. That path is a *test mock*, not the ARM compiler in `C:\\DevTools\\KeilAC5\\ARM\\arm_compiler_5.06\\bin`. Update the checkout (`git pull`) to get the corrected tests; no compiler reinstall is needed.
+**Windows troubleshooting:** Older test revisions wrote Unix `#!` Python scripts with an `.exe` extension and attempted to execute them. Windows then displayed an **Unsupported 16-Bit Application** dialog for a path resembling `%TEMP%\\tmp...\\bin\\armcc.exe`. That path is a *test mock*, not the ARM compiler in `C:\\DevTools\\KeilAC5\\ARM\\ARM_Compiler_5.06u6\\bin`. Update the checkout (`git pull`) to get the corrected tests; no compiler reinstall is needed.
 
 ## Why two toolchains?
 
 On **Oberon**, ATfE 21.1.1 (Clang/LLD) builds the complete firmware. On **x1-carbon**, the historical ARMCC5 compiler compiles small test cases to compare generated code and ABI details with the original proprietary libraries. The ARMCC linker is used only for license-permitted small test programs, not for building the full firmware.
 
-Some Keil Lite/evaluation configurations emit objects that `ld.lld` cannot consume. Transfer the generated object to Oberon and test its ELF format before attempting mixed-toolchain linking; a successful `armcc -c` does not guarantee LLD compatibility.
+The tested MDK-ARM Lite installation emits native ORC symbolic objects, not relocatable ELF. `export_elf` reports the license error rather than claiming conversion; `fromelf` inspection and the linker map remain available for comparisons.
 
 ## Trusted-LAN deployment
 
