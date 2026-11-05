@@ -7,11 +7,14 @@ approximate conversion or substitute compiler is used.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import uuid
+
+from structured_inspection import parse_fromelf
 
 
 _LICENSE_RE = re.compile(r"\b([A-Z]\d{4}U):\s*Option\s+['\"].+?['\"]\s+not available with your license", re.I)
@@ -75,6 +78,7 @@ class CompilerFeatures:
                 "compile_files": {"status": "available", "notes": "Staged source/header tree using -I"},
                 "preprocess": {"status": "available", "command": "armcc -E"},
                 "source_disassembly": {"status": "available", "command": "fromelf --text -c --interleave=source"},
+                "structured_inspection": {"status": "available", "method": "verified fromelf-text parser; check complete/parse_warnings"},
                 "assembly_listing": {
                     "status": "blocked_by_license", "command": "armcc -S --interleave",
                     "diagnostic_code": "C3921U", "alternative": "inspect_object(view='source')",
@@ -241,4 +245,30 @@ class CompilerFeatures:
                 result.update({"ok": False, "error": "fromelf succeeded but did not produce a valid ELF artifact"})
             else:
                 result["elf"] = self._register(output)
+        return result
+
+    def inspect_structured(self, artifact_id: str) -> dict:
+        """Parse all fromelf sections, symbols and relocations, retain exact text.
+
+        This is a reported, versioned fromelf-text parser rather than a native
+        ELF parser: callers must check 'complete' and 'parse_warnings'.
+        """
+        path = self._lookup(artifact_id)
+        job = self.workspace / uuid.uuid4().hex
+        job.mkdir()
+        raw = job / "fromelf_raw.txt"
+        argv = [str(self._exe("fromelf")), "--text", "-c", "-s", "-r", str(path)]
+        result = self._run_to_file(argv, cwd=path.parent, output=raw, timeout=90)
+        result["command"] = argv
+        if not result.get("ok"):
+            return result
+        try:
+            result["raw_report"] = self._register(raw)
+            parsed = parse_fromelf(raw.read_text(encoding="utf-8", errors="replace"))
+            serialized = job / "structured.json.txt"
+            serialized.write_text(json.dumps(parsed, indent=2, ensure_ascii=False), encoding="utf-8")
+            result["structured_report"] = self._register(serialized)
+            result["structured"] = parsed
+        except (OSError, ValueError) as exc:
+            result.update({"ok": False, "error": f"Structured inspection failed: {exc}"})
         return result

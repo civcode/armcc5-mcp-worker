@@ -59,6 +59,12 @@ def inspect_object(artifact_id: str, view: str = "all", save_output: bool = Fals
 
 
 @mcp.tool()
+def inspect_structured(artifact_id: str) -> dict:
+    """Return best-effort JSON sections, symbols and relocations; preserve original full fromelf report and parse warnings."""
+    return worker.inspect_structured(artifact_id)
+
+
+@mcp.tool()
 def export_elf(artifact_id: str) -> dict:
     """Try fromelf --elf on an object. MDK-Lite rejects ORC conversion (Q3921U); returns the exact license diagnostic."""
     return worker.export_elf(artifact_id)

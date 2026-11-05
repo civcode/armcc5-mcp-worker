@@ -75,6 +75,7 @@ Example request to Pi:
 | `compile_c` | Existing single-source compilation interface (unchanged) |
 | `compile_files` | Stage multiple sources/headers with relative include paths; mode `object`, `preprocess`, or `assembly` |
 | `inspect_object` | fromelf views `code`, `symbols`, `relocations`, `sections`, `all`, and `source`; `save_output=true` stores complete text |
+| `inspect_structured` | Return parsed JSON sections/symbols/relocations plus full original fromelf text and parsing warnings |
 | `export_elf` | Try native `fromelf --elf` and explain `Q3921U` if MDK-Lite forbids it |
 | `link_probe` | Link up to 12 objects; return downloadable `probe.map`; optional `scatter_content` |
 | `get_artifact` | Chunked, lossless Base64 artifact download with original ORC/ELF/text format identification |
@@ -111,6 +112,18 @@ cpp or ARMCC-compatibility shims. Use `inspect_object(view="source",
 save_output=true)` for source-interleaved `fromelf` disassembly and download
 the complete report via its `report.artifact_id`, avoiding the inline text
 size limit. The original native object bytes remain unchanged.
+
+For a structured comparison, call `inspect_structured(artifact_id)`.
+It runs native `fromelf --text -c -s -r` and returns JSON arrays named
+`sections`, `symbols`, and `relocations`, with typed numeric fields.
+It includes both a `raw_report` artifact and a `structured_report`
+(JSON text) artifact for complete chunked retrieval. **This is a tested,
+best-effort parser of fromelf text, not native fromelf XML or an ELF
+conversion**. Always inspect `structured.complete` and
+`structured.parse_warnings` before using the JSON for strict ABI comparisons.
+The parser was cross-checked against the 2026-11-05 Windows probe output
+(40 sections, 30 symbols, 40 relocations, no count warnings); other object
+layouts may need additional parsing cases.
 
 ### License-limited features remain visible
 

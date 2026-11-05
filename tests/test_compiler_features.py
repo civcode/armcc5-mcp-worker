@@ -174,6 +174,22 @@ class FeatureTests(unittest.TestCase):
         self.assertEqual(caps["relocatable_elf_export"]["diagnostic_code"], "Q3921U")
         self.assertEqual(caps["preprocess"]["status"], "available")
 
+    def test_inspect_structured_preserves_report_and_flags_uncertainty(self):
+        from test_structured_inspection import SAMPLE
+        obj = self.worker.compile_files(self.files(), sources=["src/node.c"])["results"][0]["artifact"]
+        def capture(argv, *, cwd, output, timeout):
+            output.write_text(SAMPLE, encoding="utf-8")
+            return self._good(SAMPLE)
+        with mock.patch.object(self.worker, "_run_to_file", side_effect=capture):
+            data = self.worker.inspect_structured(obj["artifact_id"])
+        self.assertTrue(data["ok"], data)
+        self.assertEqual(data["structured"]["symbol_count"], 3)
+        self.assertEqual(data["structured"]["relocation_count"], 1)
+        self.assertTrue(data["structured"]["complete"])
+        self.assertEqual(data["raw_report"]["format"], "text")
+        self.assertEqual(data["structured_report"]["format"], "text")
+        self.assertIn("-r", data["command"])
+
     def test_fromelf_failure_not_automatically_labeled_license(self):
         result = self.worker.compile_files(self.files(), sources=["src/node.c"])["results"][0]["artifact"]
         with mock.patch.object(self.worker, "_run", return_value=self._error("invalid ORC object")):
