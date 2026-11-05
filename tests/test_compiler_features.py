@@ -17,7 +17,7 @@ class FeatureTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
         (root / "bin").mkdir()
-        for name in ("armcc", "fromelf", "armlink"):
+        for name in ("armcc", "fromelf", "armlink", "armasm"):
             (root / "bin" / f"{name}.exe").touch()
         self.worker = ARMCCWorker(str(root))
         self.calls = []
@@ -35,6 +35,9 @@ class FeatureTests(unittest.TestCase):
     def fake_run(self, argv, *, cwd=None, timeout=30):
         self.calls.append((list(argv), cwd, timeout))
         exe = Path(argv[0]).stem.lower()
+        if exe == "armasm":
+            Path(argv[argv.index("-o") + 1]).write_bytes(ORC)
+            return self._good()
         if exe == "armcc" and "--vsn" in argv:
             return self._good("ARM Compiler 5.06 update 6 (build 750)")
         if exe == "armcc" and "-S" in argv:
@@ -42,6 +45,9 @@ class FeatureTests(unittest.TestCase):
                                "Fatal error: C3921U: Option '--interleave' not available with your license.")
         if exe == "armcc":
             Path(argv[argv.index("-o") + 1]).write_bytes(ORC)
+            return self._good()
+        if exe == "fromelf" and any(x in argv for x in ("--i32", "--i32combined")):
+            Path(next(x.split("=",1)[1] for x in argv if x.startswith("--output="))).write_text(":00000001FF\n", encoding="ascii")
             return self._good()
         if exe == "fromelf" and "--elf" in argv:
             return self._error("Fatal error: Q3921U: Option '--elf' not available with your license.")

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import atexit
 import base64
+import binascii
 import hashlib
 import os
 from pathlib import Path
@@ -13,11 +14,13 @@ import tempfile
 import threading
 import uuid
 
-from compiler_features import CompilerFeatures
+from compiler_features import CompilerFeatures, _license_diagnostic
+from artifact_store import ArtifactStore
+from object_comparison import ObjectComparison
 
 
-class ARMCCWorker(CompilerFeatures):
-    """Small, session-local artifact store and compiler wrapper."""
+class ARMCCWorker(CompilerFeatures, ArtifactStore, ObjectComparison):
+    """ARM Compiler 5 subprocess worker and optional persistent artifact catalog."""
 
     MAX_SOURCE_BYTES = 256 * 1024
     MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
@@ -30,8 +33,7 @@ class ARMCCWorker(CompilerFeatures):
         self.root = Path(compiler_root or os.getenv("ARMCC_ROOT") or default_root)
         self.bin = self.root / "bin"
         self.workspace = Path(tempfile.mkdtemp(prefix="armcc5-worker-"))
-        self.artifacts: dict[str, Path] = {}
-        self.lock = threading.Lock()
+        self._init_artifacts()
         atexit.register(shutil.rmtree, self.workspace, ignore_errors=True)
 
     def _exe(self, name: str) -> Path:
@@ -62,38 +64,8 @@ class ARMCCWorker(CompilerFeatures):
         except subprocess.TimeoutExpired as ex:
             return {"ok": False, "exit_code": None, "stdout": "", "stderr": f"Timed out after {timeout}s: {ex}"}
 
-    def _register(self, path: Path) -> dict:
-        if not path.is_file():
-            raise FileNotFoundError(path)
-        size = path.stat().st_size
-        if size > self.MAX_ARTIFACT_BYTES:
-            raise ValueError(f"Artifact exceeds {self.MAX_ARTIFACT_BYTES} bytes")
-        artifact_id = uuid.uuid4().hex
-        with path.open("rb") as f:
-            signature = f.read(16)
-            f.seek(0)
-            sha256 = hashlib.file_digest(f, "sha256").hexdigest()
-        artifact_format = ("ELF" if signature.startswith(b"\x7fELF") else
-                           "ORC" if signature.startswith(b"\xf7ORC") else
-                           "text" if path.suffix.lower() in (".i", ".s", ".lst", ".map", ".txt") else
-                           "unknown")
-        with self.lock:
-            self.artifacts[artifact_id] = path
-        return {
-            "artifact_id": artifact_id, "name": path.name, "size": size,
-            "sha256": sha256, "format": artifact_format,
-            "first_16_bytes_hex": signature.hex(),
-        }
-
-    def _lookup(self, artifact_id: str) -> Path:
-        with self.lock:
-            path = self.artifacts.get(artifact_id)
-        if path is None or not path.is_file():
-            raise ValueError(f"Unknown artifact ID: {artifact_id}")
-        return path
-
     def compiler_info(self) -> dict:
-        tools = {n: str(self._exe(n)) for n in ("armcc", "fromelf", "armlink")}
+        tools = {n: str(self._exe(n)) for n in ("armcc", "fromelf", "armlink", "armasm")}
         available = {n: Path(p).is_file() for n, p in tools.items()}
         result = {"compiler_root": str(self.root), "tools": tools, "available": available,
                   "capabilities": self.compiler_capabilities()}
@@ -134,7 +106,7 @@ class ARMCCWorker(CompilerFeatures):
         return result
 
     def inspect_object(self, artifact_id: str, view: str = "all", save_output: bool = False) -> dict:
-        """Inspect a native object or AXF, optionally saving the entire fromelf output."""
+        """fromelf text inspection; flag missing source annotations explicitly."""
         views = {
             "code": ["-c"], "symbols": ["-s"],
             "relocations": ["-r"], "sections": ["-v"],
@@ -155,61 +127,143 @@ class ARMCCWorker(CompilerFeatures):
         else:
             result = self._run(argv, cwd=path.parent, timeout=30)
         result.update({"view": view, "command": argv})
+        if view == "source" and result.get("ok"):
+            # Probe-verified source annotations start with ';;;'. A -g-less ORC
+            # still disassembles successfully, but loses line correlations.
+            if save_output:
+                with report.open("rb") as stream:
+                    detected = any(line.lstrip().startswith(b";;;") for line in stream)
+            else:
+                detected = any(line.lstrip().startswith(";;;") for line in
+                               result.get("stdout", "").splitlines())
+            result["source_interleaving_detected"] = detected
+            if not detected:
+                result["warning"] = ("No source-line annotations detected. Compile with debug=true (-g) "
+                                     "and make corresponding source available; this output is code-only, "
+                                     "not a compiler -S listing.")
         return result
 
     def link_probe(self, object_ids: list[str], entry_symbol: str = "main",
-                   scatter_content: str | None = None) -> dict:
-        """Link objects with a complete map artifact; optionally use a scatter file."""
-        if not 1 <= len(object_ids) <= 12:
+                   scatter_content: str | None = None, link_flags: list[str] | None = None) -> dict:
+        """Link and emit full Keil-style report, or test --partial/--reloc."""
+        if not isinstance(object_ids, list) or not 1 <= len(object_ids) <= 12:
             return {"ok": False, "error": "Need 1..12 object IDs"}
-        if not re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", entry_symbol):
+        if not isinstance(entry_symbol, str) or not re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", entry_symbol):
             return {"ok": False, "error": "Invalid entry symbol"}
         if scatter_content is not None and (not isinstance(scatter_content, str) or
                                             len(scatter_content.encode("utf-8")) > 256 * 1024):
             return {"ok": False, "error": "scatter_content must be UTF-8 text <= 256 KiB"}
+        try:
+            flags = self._validated_flags(link_flags, max_count=40)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        if any(x.lower().split("=")[0] in ("--output", "-o", "--list", "--scatter") for x in flags):
+            return {"ok": False, "error": "link_flags cannot override output, listing or scatter paths; use scatter_content"}
+        if "--partial" in flags and scatter_content is not None:
+            return {"ok": False, "error": "--partial cannot be combined with scatter_content"}
         objects = [self._lookup(i) for i in object_ids]
         job = self.workspace / uuid.uuid4().hex
         job.mkdir()
-        target = job / "probe.axf"
+        partial = "--partial" in flags or "--ldpartial" in flags
+        target = job / ("probe.o" if partial else "probe.axf")
         listing = job / "probe.map"
-        argv = [str(self._exe("armlink")), "--cpu", "Cortex-M3", "--entry", entry_symbol]
-        if scatter_content is None:
-            argv.extend(["--ro-base", "0x08000000", "--rw-base", "0x20000000"])
-        else:
-            scatter = job / "probe.sct"
-            scatter.write_text(scatter_content, encoding="utf-8")
-            argv.extend(["--scatter", str(scatter)])
-        argv.extend(["--output", str(target), "--map", f"--list={listing}", *[str(o) for o in objects]])
-        result = self._run(argv, cwd=job, timeout=60)
+        argv = [str(self._exe("armlink")), "--cpu", "Cortex-M3"]
+        if not partial:
+            argv.extend(["--entry", entry_symbol])
+            if scatter_content is None:
+                argv.extend(["--ro-base", "0x08000000", "--rw-base", "0x20000000"])
+            else:
+                scatter = job / "probe.sct"
+                scatter.write_text(scatter_content, encoding="utf-8")
+                argv.extend(["--scatter", str(scatter)])
+            argv.extend(["--map", "--xref", "--symbols", "--info=unused", f"--list={listing}"])
+        argv.extend([*flags, "--output", str(target), *[str(o) for o in objects]])
+        result = self._run(argv, cwd=job, timeout=90)
         result["command"] = argv
+        result["link_flags"] = flags
+        result["partial_link"] = partial
+        result = _license_diagnostic(result, alternative="Link with supported options under the installed MDK-Lite license")
         if listing.is_file():
             result["map"] = self._register(listing)
+            map_text = listing.read_text(encoding="utf-8", errors="replace")
+            result["unused_sections_reported"] = ("Removing Unused" in map_text or "Removing " in map_text)
+            result["cross_references_reported"] = "Section Cross References" in map_text
         if result["ok"] and target.is_file():
-            result["axf"] = self._register(target)
+            output = self._register(target)
+            result["artifact"] = output
+            if not partial:
+                result["axf"] = output
+            elif output["format"] != "ELF":
+                result["warning"] = "--partial completed but did not produce recognizable ELF bytes"
+            elif output.get("elf_type") != "ET_REL":
+                result["warning"] = "--partial output is ELF but not confirmed ET_REL; do not treat it as a relocatable object"
         elif result["ok"]:
             result["ok"] = False
-            result["error"] = "Linker returned success without producing an AXF"
+            result["error"] = "Linker returned success without producing an output artifact"
+        if partial:
+            result["note"] = "Partial link may change symbols, sections and relocations; not a lossless ORC-to-ELF conversion"
         return result
 
-    def get_artifact(self, artifact_id: str, offset: int = 0, max_bytes: int = 65536) -> dict:
-        """Read original tool output byte-for-byte in base64 chunks."""
-        if not 0 <= max_bytes <= self.MAX_CHUNK or max_bytes == 0:
-            return {"ok": False, "error": f"max_bytes must be 1..{self.MAX_CHUNK}"}
+    def compile_asm(self, source: str = "", content_base64: str = "",
+                    extra_flags: list[str] | None = None) -> dict:
+        """Run native ARMASM5 on a standalone ARMASM (.s) source."""
+        if bool(source) == bool(content_base64):
+            return {"ok": False, "error": "Supply exactly one of source or content_base64"}
+        try:
+            if source:
+                data = source.encode("utf-8")
+            else:
+                data = base64.b64decode(content_base64, validate=True)
+            flags = self._validated_flags(extra_flags, max_count=32)
+        except (ValueError, UnicodeError, binascii.Error) as exc:
+            return {"ok": False, "error": str(exc)}
+        if len(data) > self.MAX_SOURCE_BYTES:
+            return {"ok": False, "error": "Assembly input exceeds 256 KiB"}
+        job = self.workspace / uuid.uuid4().hex
+        job.mkdir()
+        asm, out = job / "probe.s", job / "probe.o"
+        asm.write_bytes(data)
+        argv = [str(self._exe("armasm")), "--cpu", "Cortex-M3", "--thumb", *flags,
+                "-o", str(out), str(asm)]
+        result = self._run(argv, cwd=job, timeout=60)
+        result.update({"command": argv, "source_sha256": hashlib.sha256(data).hexdigest()})
+        result = _license_diagnostic(result, alternative="Use compiler-generated ORC and fromelf disassembly")
+        if result["ok"] and out.is_file():
+            result["object"] = self._register(out)
+            result["artifact"] = result["object"]
+        elif result["ok"]:
+            result.update({"ok": False, "error": "Assembler produced no object"})
+        return result
+
+    def tool_help(self, tool: str = "armcc") -> dict:
+        """Report authentic ARM tool --help without requiring a generated object."""
+        if tool not in ("armcc", "armlink", "fromelf", "armasm"):
+            return {"ok": False, "error": "tool must be armcc, armlink, fromelf, or armasm"}
+        job = self.workspace / uuid.uuid4().hex
+        job.mkdir()
+        out = job / f"{tool}_help.txt"
+        argv = [str(self._exe(tool)), "--help"]
+        result = self._run_to_file(argv, cwd=job, output=out, timeout=30)
+        result.update({"command": argv, "tool": tool})
+        if out.is_file():
+            result["report"] = self._register(out)
+        return result
+
+    def convert_image(self, artifact_id: str, format: str = "i32combined") -> dict:
+        """Convert a linked AXF to Intel HEX using fromelf, not armlink."""
+        if format not in ("i32", "i32combined"):
+            return {"ok": False, "error": "format must be i32 or i32combined"}
         path = self._lookup(artifact_id)
-        size = path.stat().st_size
-        if not 0 <= offset <= size:
-            return {"ok": False, "error": f"offset must be 0..{size}"}
-        with path.open("rb") as f:
-            signature = f.read(4)
-            f.seek(offset)
-            chunk = f.read(max_bytes)
-        fmt = ("ELF" if signature == b"\x7fELF" else
-               "ORC" if signature == b"\xf7ORC" else
-               "text" if path.suffix.lower() in (".i", ".s", ".map", ".txt") else "unknown")
-        return {
-            "ok": True, "artifact_id": artifact_id,
-            "filename": path.name, "total_bytes": size, "format": fmt,
-            "offset": offset, "next_offset": offset + len(chunk),
-            "complete": offset + len(chunk) == size,
-            "base64": base64.b64encode(chunk).decode("ascii"),
-        }
+        job = self.workspace / uuid.uuid4().hex
+        job.mkdir()
+        destination = job / "probe.hex"
+        argv = [str(self._exe("fromelf")), f"--{format}", f"--output={destination}", str(path)]
+        result = self._run(argv, cwd=job, timeout=90)
+        result["command"] = argv
+        result = _license_diagnostic(result, alternative="Use a linker image format supported by your toolchain")
+        if result["ok"]:
+            if destination.is_file():
+                result["artifact"] = self._register(destination)
+            else:
+                result.update({"ok": False, "error": "fromelf returned success without an output file; check load-region format"})
+        return result

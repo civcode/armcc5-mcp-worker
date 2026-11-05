@@ -27,7 +27,7 @@ class WorkerTests(unittest.TestCase):
         (root / "bin").mkdir()
         # Create placeholders for compiler_info() availability checks only.
         # Never launch these files. Python mocks simulate all tool subprocesses.
-        for name in ("armcc", "fromelf", "armlink"):
+        for name in ("armcc", "fromelf", "armlink", "armasm"):
             (root / "bin" / f"{name}.exe").touch()
         self.worker = ARMCCWorker(str(root))
         self.calls = []

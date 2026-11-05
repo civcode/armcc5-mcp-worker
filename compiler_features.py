@@ -6,6 +6,8 @@ approximate conversion or substitute compiler is used.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -77,7 +79,7 @@ class CompilerFeatures:
                 "compile_c": {"status": "available"},
                 "compile_files": {"status": "available", "notes": "Staged source/header tree using -I"},
                 "preprocess": {"status": "available", "command": "armcc -E"},
-                "source_disassembly": {"status": "available", "command": "fromelf --text -c --interleave=source"},
+                "source_disassembly": {"status": "available_with_debug_info", "command": "fromelf --text -c --interleave=source", "requires": "ARMCC -g and source-line information"},
                 "structured_inspection": {"status": "available", "method": "verified fromelf-text parser; check complete/parse_warnings"},
                 "assembly_listing": {
                     "status": "blocked_by_license", "command": "armcc -S --interleave",
@@ -87,10 +89,25 @@ class CompilerFeatures:
                     "status": "blocked_by_license", "command": "fromelf --elf",
                     "diagnostic_code": "Q3921U", "alternative": "get_artifact returns original ORC bytes; use fromelf inspection",
                 },
-                "linker_map": {"status": "available", "command": "armlink --map --list=..."},
+                "linker_map": {"status": "available", "command": "armlink --map --xref --symbols --info=unused --list=..."},
+                "asm": {"status": "untested_on_live_host", "command": "armasm --cpu Cortex-M3 --thumb"},
+                "artifact_upload": {"status": "available", "notes": "Native ORC/ELF bytes, max 8 MiB per upload"},
+                "artifact_persistence": {"status": "available_if_configured", "env": "ARMCC_ARTIFACT_DIR"},
+                "linker_partial_and_reloc": {"status": "untested_on_live_host", "notes": "Try --partial or --reloc separately; not equivalent"},
+                "image_conversion": {"status": "untested_on_live_host", "command": "fromelf --i32combined"},
                 "linked_axf_elf": {"status": "available", "notes": "Linked AXF is ELF; not equivalent to an unlinked .o"},
             },
         }
+
+    @staticmethod
+    def _validated_flags(flags: list[str] | None, *, max_count: int = 32) -> list[str]:
+        if flags is None:
+            return []
+        if (not isinstance(flags, list) or len(flags) > max_count or
+                any(not isinstance(x, str) or not 1 <= len(x) <= 240 or
+                    any(ch in x for ch in ("\x00", "\r", "\n")) for x in flags)):
+            raise ValueError(f"flags must be a list of at most {max_count} strings (1..240 characters each)")
+        return flags
 
     def _run_to_file(self, arguments: list[str], *, cwd: Path, output: Path, timeout: int = 60) -> dict:
         """Capture complete compiler/fromelf stdout directly to an artifact file."""
@@ -117,7 +134,7 @@ class CompilerFeatures:
         self, files: list[dict], sources: list[str] | None = None,
         include_paths: list[str] | None = None, optimization: int = 2,
         debug: bool = True, extra_flags: list[str] | None = None,
-        mode: str = "object",
+        mode: str = "object", raw_compiler_flags: list[str] | None = None,
     ) -> dict:
         """Compile a staged source tree as independent translation units.
 
@@ -131,20 +148,35 @@ class CompilerFeatures:
                 raise ValueError("optimization must be an integer from 0 to 3")
             if type(debug) is not bool:
                 raise ValueError("debug must be boolean")
-            flags = extra_flags if extra_flags is not None else []
-            if (not isinstance(flags, list) or len(flags) > 32 or
-                    any(not isinstance(x, str) or len(x) > 240 or not x or "\x00" in x for x in flags)):
-                raise ValueError("extra_flags must contain at most 32 strings of 1..240 characters")
+            flags = self._validated_flags(extra_flags, max_count=32)
+            raw_flags = self._validated_flags(raw_compiler_flags, max_count=64) if raw_compiler_flags is not None else None
+            if raw_flags is not None and flags:
+                raise ValueError("raw_compiler_flags and extra_flags are mutually exclusive")
+            if raw_flags is not None and any(x.lower() in ("-c", "-e", "-s", "-o", "--output") or
+                                             x.lower().startswith("--output=") for x in raw_flags):
+                raise ValueError("raw_compiler_flags must not override worker-owned mode/output")
             if not isinstance(files, list) or not 1 <= len(files) <= self.MAX_PROJECT_FILES:
                 raise ValueError(f"files must contain 1..{self.MAX_PROJECT_FILES} entries")
             stored: dict[str, bytes] = {}
             total = 0
             collisions: set[str] = set()
             for item in files:
-                if not isinstance(item, dict) or set(item) != {"path", "content"} or not isinstance(item["content"], str):
-                    raise ValueError("Each file needs exactly 'path' and UTF-8 'content' strings")
+                if not isinstance(item, dict) or "path" not in item or set(item) not in (
+                        {"path", "content"}, {"path", "content_base64"}):
+                    raise ValueError("Each file needs 'path' and exactly one of 'content' or 'content_base64'")
                 name = _project_path(item["path"])
-                data = item["content"].encode("utf-8")
+                if "content" in item:
+                    if not isinstance(item["content"], str):
+                        raise ValueError("content must be UTF-8 text")
+                    data = item["content"].encode("utf-8")
+                else:
+                    encoded = item["content_base64"]
+                    if not isinstance(encoded, str) or len(encoded) > 4 * ((self.MAX_PROJECT_FILE_BYTES + 2) // 3):
+                        raise ValueError("content_base64 exceeds 1 MiB decoded file limit")
+                    try:
+                        data = base64.b64decode(encoded, validate=True)
+                    except (binascii.Error, ValueError) as ex:
+                        raise ValueError(f"Invalid content_base64 for {name}") from ex
                 total += len(data)
                 if len(data) > self.MAX_PROJECT_FILE_BYTES or total > self.MAX_PROJECT_BYTES:
                     raise ValueError("Project exceeds per-file 1 MiB or aggregate 4 MiB limit")
@@ -184,8 +216,9 @@ class CompilerFeatures:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
 
-        common = [str(self._exe("armcc")), "--cpu", "Cortex-M3", "--thumb", "--c99", f"-O{optimization}",
-                  "-g" if debug else "--no_debug"]
+        common = ([str(self._exe("armcc")), *raw_flags] if raw_flags is not None else
+                  [str(self._exe("armcc")), "--cpu", "Cortex-M3", "--thumb", "--c99", f"-O{optimization}",
+                   "-g" if debug else "--no_debug"])
         common.extend(f"-I{(srcroot / p).as_posix()}" for p in includes)
         common.extend(flags)
         results = []
@@ -216,7 +249,8 @@ class CompilerFeatures:
         return {
             "ok": all(r["ok"] for r in results), "mode": mode,
             "results": results, "include_paths": includes, "optimization": optimization,
-            "debug": debug, "extra_flags": flags, "files_staged": len(stored),
+            "debug": debug, "extra_flags": flags, "raw_compiler_flags": raw_flags,
+            "effective_flags": common[1:], "files_staged": len(stored),
             "source_sha256": {name: hashlib.sha256(stored[name]).hexdigest() for name in chosen},
         }
 

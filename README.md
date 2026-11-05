@@ -79,6 +79,12 @@ Example request to Pi:
 | `export_elf` | Try native `fromelf --elf` and explain `Q3921U` if MDK-Lite forbids it |
 | `link_probe` | Link up to 12 objects; return downloadable `probe.map`; optional `scatter_content` |
 | `get_artifact` | Chunked, lossless Base64 artifact download with original ORC/ELF/text format identification |
+| `upload_artifact` | Upload original vendor ORC/ELF objects in Base64 (8 MiB limit, optional SHA-256 verification) |
+| `list_artifacts` | List session artifacts or SHA-256 persistent artifacts with `ARMCC_ARTIFACT_DIR` |
+| `compare_objects` | Symmetric native `fromelf` comparison of sections, symbols, relocations; never invent ORC .text byte parity |
+| `compile_asm` | ARMASM5 assembly of source text or exact bytes supplied in Base64 |
+| `tool_help` / `list_flags` | Native compiler, assembler, linker or fromelf `--help` output |
+| `convert_image` | Convert a linked AXF to Intel HEX via `fromelf --i32` / `--i32combined` |
 
 ### Reproducible source-tree compilation
 
@@ -125,6 +131,69 @@ The parser was cross-checked against the 2026-11-05 Windows probe output
 (40 sections, 30 symbols, 40 relocations, no count warnings); other object
 layouts may need additional parsing cases.
 
+### Fidelity, linker reports and vendor-object parity
+
+The worker exposes strict tool parameters. An unknown name such as `flags`
+returns a structured `UnknownToolArgument` response instead of silently
+falling back to the default `-O2 -g`. Use `extra_flags` with `compile_c`,
+or `extra_flags` / `raw_compiler_flags` with `compile_files`.
+`raw_compiler_flags` **replaces** the built-in CPU, Thumb, C99,
+optimization and debug switches; the full effective command is returned.
+Do not combine `raw_compiler_flags` and `extra_flags`.
+
+Each `compile_files` entry accepts either `content` (UTF-8 text) or
+`content_base64` (original, unmodified bytes). This preserves GBK source
+strings, CRLF and other non-ASCII source content that would change under UTF-8
+conversion. The staged project limits are 128 files, 1 MiB per file, 4 MiB
+total, up to 24 .c sources, 32 include paths, and 32 flags of 240 characters
+(`raw_compiler_flags` up to 64). `compile_c` remains limited to 256 KiB and
+20 flags of 120 characters.
+
+`compile_asm(source=...)` assembles an ARMASM5 `.s` source using native
+ARMASM syntax (`AREA`, `THUMB`, `EXPORT`, `END`).
+Alternatively, `content_base64` supplies original bytes, up to 256 KiB.
+Whether a particular assembly/linker option is available under the installed
+MDK-Lite license is reported by the underlying executable.
+
+Normal `link_probe` now writes a **full linker report** using
+`--map --xref --symbols --info=unused --list=probe.map`, covering section
+cross-references and discarded input sections as well as memory placement.
+It accepts up to 12 object/library artifact IDs, optional scatter text, and
+`link_flags` (up to 40 options, 240 characters each). The worker reserves
+its output, listing and scatter paths. `link_flags=["--reloc"]` and
+`link_flags=["--partial"]` are independent, experimental invocations, **not
+lossless ORC-to-ELF conversions**. Partial output is identified by its actual
+file signature and ELF type where possible. Actual Lite-license support for
+these options remains unverified on x1-carbon.
+
+`convert_image(artifact_id, format="i32combined")` invokes **fromelf** to
+generate Intel HEX from a linked image; it does not pretend that
+`armlink --format=ihex` is the same operation. `tool_help(tool="armlink")`
+(or `list_flags`) saves the authentic `--help` output as an artifact without
+requiring an output object.
+
+`upload_artifact(filename, content_base64, sha256="")` registers the original
+vendor object without modifying its bytes. Call `inspect_structured` on both
+vendor and candidate artifacts or `compare_objects(a, b)`, which uses the
+**same native fromelf pipeline on both inputs**. The structured comparison
+normalizes common ARMCC symbol attributes and reports section, symbol,
+relocation and data-section metadata differences. For ORC,
+`text_identical=null` because exact `.text` bytes are not independently
+available; this does not claim byte-identical code.
+
+By default artifacts disappear when the worker stops. To persist them, set
+`ARMCC_ARTIFACT_DIR` to a Windows directory **before launching** the server.
+IDs then derive from SHA-256 and survive restarts; `list_artifacts` lists
+their metadata. Persistence does not retroactively restore old ephemeral UUID
+IDs, and the store is not automatically pruned. Unknown artifact IDs now
+produce structured error results.
+
+`inspect_object(view="source")` succeeds without debug data but cannot
+show source lines then. The response now sets
+`source_interleaving_detected=false` and includes a warning when no `;;;`
+source annotations are found; build with `debug=true` / `-g` and retain
+matching source files for meaningful line mapping.
+
 ### License-limited features remain visible
 
 The real Windows probe of ARM Compiler **5.06u6 build 750 / MDK-ARM Lite** on
@@ -152,7 +221,7 @@ and optionally uses supplied `scatter_content` instead of its default
 RO/RW base addresses. Link-size restrictions from the installed license
 still apply. A successful map alone does not establish ABI/runtime parity.
 
-Object IDs persist in memory until the worker process exits. Generated artifacts live in a temporary directory and are removed on worker exit. This version has no persistent job queue, file sharing, or arbitrary remote command execution.
+Without ARMCC_ARTIFACT_DIR, artifacts are session-local and deleted on shutdown. The worker does not provide arbitrary shell execution.
 
 ## Tests
 
@@ -160,7 +229,7 @@ From the repository root, on Linux or Windows:
 
 ```bash
 python -m unittest discover -s tests -v
-python -m py_compile server.py worker_core.py compiler_features.py
+python -m compileall -q server.py worker_core.py compiler_features.py artifact_store.py object_comparison.py request_guard.py structured_inspection.py
 ```
 
 The tests use **Python subprocess mocks**, not real compiler binaries. They create empty `.exe` placeholders only to verify availability checks, then simulate `armcc`, `fromelf`, and `armlink` execution in Python; this makes the suite portable to **Windows and Linux**. They verify the orchestration logic but **do not** establish real ARMCC5/Keil behavior or an end-to-end Windows-to-Pi connection. The MCP transport itself requires `pip install -r requirements.txt`.
