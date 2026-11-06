@@ -34,7 +34,22 @@ class ARMCCWorker(CompilerFeatures, ArtifactStore, ObjectComparison):
         self.bin = self.root / "bin"
         self.workspace = Path(tempfile.mkdtemp(prefix="armcc5-worker-"))
         self._init_artifacts()
-        atexit.register(shutil.rmtree, self.workspace, ignore_errors=True)
+        self._close_lock = threading.Lock()
+        self._closed = False
+        # An interpreter-exit fallback; the server also calls close() after
+        # Uvicorn drains requests on Ctrl+C/SIGTERM.
+        atexit.register(self.close)
+
+    def close(self) -> None:
+        """Release transient job files; never delete ARMCC_ARTIFACT_DIR.
+
+        Safe to call both after a graceful server shutdown and from atexit.
+        """
+        with self._close_lock:
+            if self._closed:
+                return
+            shutil.rmtree(self.workspace, ignore_errors=True)
+            self._closed = True
 
     def _exe(self, name: str) -> Path:
         return self.bin / f"{name}.exe"

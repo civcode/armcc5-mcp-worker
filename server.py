@@ -8,6 +8,7 @@ from mcp.server.mcpserver import Context
 from mcp.server.transport_security import TransportSecuritySettings
 
 from request_guard import checked_call
+from worker_lifecycle import run_with_cleanup
 from worker_core import ARMCCWorker
 
 worker = ARMCCWorker()
@@ -145,11 +146,16 @@ def get_artifact(ctx: Context, artifact_id: str, offset: int = 0, max_bytes: int
 
 
 if __name__ == "__main__":
-    mcp.run(
-        transport="streamable-http",
-        host=os.getenv("ARMCC_HTTP_HOST", "0.0.0.0"),
-        port=int(os.getenv("ARMCC_HTTP_PORT", "8765")),
-        stateless_http=True,
-        json_response=True,
-        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+    # Uvicorn handles Ctrl+C/SIGTERM and drains the HTTP server; then release
+    # worker-owned temporary files. Do not override Uvicorn's signal handlers.
+    run_with_cleanup(
+        lambda: mcp.run(
+            transport="streamable-http",
+            host=os.getenv("ARMCC_HTTP_HOST", "0.0.0.0"),
+            port=int(os.getenv("ARMCC_HTTP_PORT", "8765")),
+            stateless_http=True,
+            json_response=True,
+            transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+        ),
+        worker.close,
     )

@@ -49,7 +49,7 @@ The `ARMCC_ROOT` setting made with `set` is temporary and applies only to that C
 
 **Note:** `armcc.exe --vsn` checks compiler availability, not whether a test program will compile/link under the MDK-ARM Lite license.
 
-The process listens on `0.0.0.0:8765` and serves MCP at `http://x1-carbon.local:8765/mcp`; close the terminal or press Ctrl+C to stop it. The first connection may prompt for a Windows Defender Firewall exception for the private LAN. If necessary, set `ARMCC_ROOT`, `ARMCC_HTTP_HOST`, or `ARMCC_HTTP_PORT` before running `start.cmd`.
+The process listens on `0.0.0.0:8765` and serves MCP at `http://x1-carbon.local:8765/mcp`. Press **Ctrl+C once** in the launching terminal for graceful shutdown: Uvicorn stops accepting requests and drains the HTTP server, then the worker explicitly removes its temporary compilation workspace and exits without a Python traceback. The optional `ARMCC_ARTIFACT_DIR` persistent store is **not deleted**. Normal interpreter exit also has an idempotent `atexit` cleanup fallback. Do not use repeated Ctrl+C, Ctrl+Break or force-kill if you need graceful completion. The first connection may prompt for a Windows Defender Firewall exception for the private LAN. If necessary, set `ARMCC_ROOT`, `ARMCC_HTTP_HOST`, or `ARMCC_HTTP_PORT` before running `start.cmd`.
 
 No firmware repository checkout is required on Windows. Client-supplied source/header trees are staged into temporary per-job folders; individual headers, sources and include paths must be supplied in the MCP request.
 
@@ -229,7 +229,7 @@ From the repository root, on Linux or Windows:
 
 ```bash
 python -m unittest discover -s tests -v
-python -m compileall -q server.py worker_core.py compiler_features.py artifact_store.py object_comparison.py request_guard.py structured_inspection.py
+python -m compileall -q server.py worker_lifecycle.py worker_core.py compiler_features.py artifact_store.py object_comparison.py request_guard.py structured_inspection.py
 ```
 
 The tests use **Python subprocess mocks**, not real compiler binaries. They create empty `.exe` placeholders only to verify availability checks, then simulate `armcc`, `fromelf`, and `armlink` execution in Python; this makes the suite portable to **Windows and Linux**. They verify the orchestration logic but **do not** establish real ARMCC5/Keil behavior or an end-to-end Windows-to-Pi connection. The MCP transport itself requires `pip install -r requirements.txt`.
