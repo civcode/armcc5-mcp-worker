@@ -1,7 +1,10 @@
 """Plain-HTTP MCP endpoint for ARM Compiler 5 experiments on a trusted LAN."""
 from __future__ import annotations
 
+import logging
 import os
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
@@ -10,6 +13,27 @@ from mcp.server.transport_security import TransportSecuritySettings
 from request_guard import checked_call
 from worker_lifecycle import run_with_cleanup
 from worker_core import ARMCCWorker
+
+class SessionTerminationTimestamp(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+
+        if message == "Terminating session: None":
+            timestamp = datetime.fromtimestamp(
+                record.created,
+                ZoneInfo("Europe/Vienna"),
+            ).isoformat(timespec="milliseconds")
+
+            record.msg = f"{timestamp} {message}"
+            record.args = ()
+
+        return True
+
+
+logging.getLogger("mcp.server.streamable_http").addFilter(
+    SessionTerminationTimestamp()
+)
+
 
 worker = ARMCCWorker()
 mcp = MCPServer(
